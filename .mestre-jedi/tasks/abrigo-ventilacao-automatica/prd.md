@@ -2,7 +2,7 @@
 
 **Demanda:** `abrigo-ventilacao-automatica`  
 **Versão:** `1.3`  
-**Status:** 🟡 Revisão Final (Atualizado com gráficos individuais por parada — aguardando aprovação formal)
+**Status:** ✅ Aprovado (Formalmente aprovado pelo usuário — pronto para TechSpec)
 
 ---
 

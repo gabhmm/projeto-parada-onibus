@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# Caches de qualidade/testes
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Banco local SQLite e dados gerados em execução
+data/*.db
+data/*.db-wal
+data/*.db-shm
+*.csv
+
+# Ambiente local
+.env
+config.toml

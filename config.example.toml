@@ -1,0 +1,48 @@
+# Copie este arquivo para `config.toml` na raiz do projeto (ou aponte via PARADA_CONFIG).
+# Todas as opções também podem ser sobrescritas por variáveis de ambiente (PARADA_*).
+
+[server]
+host = "0.0.0.0"
+port = 5000
+
+[serial]
+# "serial" para conectar ao Arduino físico; "simulator" para rodar sem hardware
+mode = "serial"
+# Na Raspberry Pi geralmente é /dev/ttyACM0 ou /dev/ttyUSB0 (no Windows: COM3, COM4, etc.)
+port = "/dev/ttyACM0"
+baud_rate = 9600
+# Tempo sem receber JSON válido antes de marcar DESCONECTADO e pausar paradas derivadas
+timeout_seconds = 6.0
+reconnect_max_seconds = 5.0
+
+[storage]
+db_path = "data/parada_onibus.db"
+# Intervalo mínimo (em segundos) entre gravações contínuas no SQLite (preserva cartão SD)
+persist_interval_seconds = 1.0
+# Quantidade de pontos exibidos inicialmente nos gráficos da dashboard
+chart_history_points = 120
+
+[simulator]
+# Intervalo de geração de leituras no modo simulador (sem hardware)
+interval_seconds = 1.0
+
+[[stops]]
+stop_id = "parada-1"
+name = "Parada 1 — Maquete (Av. Central)"
+origin = "REAL"
+derivation_factor = 1.0
+initial_limit = 30.0
+
+[[stops]]
+stop_id = "parada-2"
+name = "Parada 2 — Praça Sol Nascente"
+origin = "SIMULADA"
+derivation_factor = 1.05
+initial_limit = 30.0
+
+[[stops]]
+stop_id = "parada-3"
+name = "Parada 3 — Terminal Sombra Verde"
+origin = "SIMULADA"
+derivation_factor = 0.95
+initial_limit = 30.0

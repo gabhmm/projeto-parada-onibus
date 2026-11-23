@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Monitoramento de Paradas de Ônibus — Raspberry Pi</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-badge">RASPI</div>
+        <div>
+          <h1>Central de Paradas de Ônibus</h1>
+          <p class="subtitle">Monitoramento térmico e controle de ventilação em tempo real</p>
+        </div>
+      </div>
+
+      <div class="topbar-actions">
+        <div id="connection-pill" class="connection-pill status-disconnected">
+          <span class="dot"></span>
+          <span id="connection-text">Aguardando sinal...</span>
+        </div>
+
+        <div class="export-group">
+          <select id="csv-stop-select" aria-label="Filtrar exportação CSV por parada">
+            <option value="">Todas as paradas</option>
+          </select>
+          <button id="btn-export-csv" type="button" class="btn btn-secondary">
+            Exportar CSV
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <section class="kpi-grid" aria-label="Resumo consolidado da rede">
+      <article class="kpi-card">
+        <span class="kpi-label">Modo de Operação</span>
+        <strong id="kpi-mode" class="kpi-value">--</strong>
+        <span id="kpi-stream-status" class="kpi-hint">Conectando ao stream SSE...</span>
+      </article>
+      <article class="kpi-card">
+        <span class="kpi-label">Temperatura Média</span>
+        <strong id="kpi-avg-temp" class="kpi-value">-- °C</strong>
+        <span class="kpi-hint">Média entre as 3 paradas</span>
+      </article>
+      <article class="kpi-card">
+        <span class="kpi-label">Temperatura Máxima</span>
+        <strong id="kpi-max-temp" class="kpi-value">-- °C</strong>
+        <span class="kpi-hint">Pico térmico atual</span>
+      </article>
+      <article class="kpi-card">
+        <span class="kpi-label">Paradas Ventilando</span>
+        <strong id="kpi-vent-count" class="kpi-value">0 / 3</strong>
+        <span class="kpi-hint">Coolers ativos no momento</span>
+      </article>
+    </section>
+
+    <main>
+      <section aria-labelledby="stops-heading">
+        <div class="section-header">
+          <h2 id="stops-heading">Paradas Monitoradas (Gráficos Individuais em Tempo Real)</h2>
+          <div class="legend-pills">
+            <span class="legend-item"><i class="swatch swatch-normal"></i> Normal</span>
+            <span class="legend-item"><i class="swatch swatch-ventilating"></i> Ventilando</span>
+            <span class="legend-item"><i class="swatch swatch-disconnected"></i> Sem Sinal</span>
+          </div>
+        </div>
+
+        <div id="stops-grid" class="stops-grid">
+          <!-- Cards das 3 paradas preenchidos dinamicamente com gráfico Chart.js em cada card -->
+        </div>
+      </section>
+
+      <section class="analytics-grid" aria-label="Análise comparativa e eventos">
+        <article class="panel-card">
+          <div class="panel-header">
+            <h2>Comparativo Térmico das 3 Paradas</h2>
+            <span class="panel-subtitle">Real vs. Derivadas em tempo real</span>
+          </div>
+          <div class="chart-container chart-container-large">
+            <canvas id="comparative-chart"></canvas>
+          </div>
+        </article>
+
+        <article class="panel-card">
+          <div class="panel-header">
+            <h2>Histórico de Eventos e Comandos</h2>
+            <span class="panel-subtitle">Últimos acionamentos</span>
+          </div>
+          <ul id="events-list" class="events-list">
+            <li class="events-empty">Nenhum evento registrado ainda.</li>
+          </ul>
+        </article>
+      </section>
+    </main>
+  </div>
+
+  <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+
+  <script src="/static/vendor/chart.umd.min.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>
