@@ -35,6 +35,14 @@ from parada_onibus.domain.ports import DataRepository, TelemetryTransport
 
 logger = logging.getLogger(__name__)
 
+# Ressincronização Raspi -> Arduino (o Arduino reinicia com limite 30.0/AUTO a cada
+# abertura da porta Serial por causa do reset via DTR).
+RESYNC_RETRY_SECONDS = 3.0
+RESYNC_MAX_ATTEMPTS = 3
+# Janela após um comando em que a telemetria ainda pode refletir o estado antigo.
+COMMAND_GRACE_SECONDS = 2.5
+LIMIT_TOLERANCE = 0.05
+
 
 class StopNetworkManager:
     """Coordena o estado em tempo real da Parada 1 (Real) e Paradas 2 e 3 (Simuladas)."""
@@ -68,6 +76,17 @@ class StopNetworkManager:
         )
         self._real_mode: ControlMode = real_saved.mode if real_saved else ControlMode.AUTO
         self._real_last_updated: datetime | None = None
+        self._real_sensor_fault: bool = False
+        self._real_sensor_error: str | None = None
+
+        # Estado desejado da Parada 1 (fonte da verdade da Raspi, persistido no SQLite).
+        self._desired_limit: float = self._real_limit
+        self._desired_mode: ControlMode = self._real_mode
+        self._desired_manual_fan: bool = real_saved.manual_fan if real_saved else False
+        self._resync_pending: bool = False
+        self._resync_attempts: int = 0
+        self._resync_last_monotonic: float = 0.0
+        self._last_command_monotonic: float = float("-inf")
 
         self._deriver = VirtualStopDeriver(config.stops, stored_settings=stored_settings)
 
@@ -133,21 +152,44 @@ class StopNetworkManager:
             return
 
         if isinstance(parsed, ArduinoAck):
-            logger.info("ACK recebido do Arduino: cmd=%s ok=%s", parsed.cmd, parsed.ok)
+            self._handle_ack(parsed, now)
             return
 
         self._apply_telemetry(parsed, now)
 
+    def _handle_ack(self, ack: ArduinoAck, now: datetime) -> None:
+        if ack.ok:
+            logger.info("ACK recebido do Arduino: cmd=%s ok=True", ack.cmd)
+            return
+        logger.warning("Arduino REJEITOU o comando %s.", ack.cmd)
+        self._record_and_publish_event(
+            SystemEvent(
+                timestamp=now,
+                stop_id=self._real_cfg.stop_id,
+                event_type=EventType.COMMAND_REJECTED,
+                message=f"{self._real_cfg.name}: Arduino rejeitou o comando '{ack.cmd}'.",
+                payload_json=json.dumps({"ack": ack.cmd, "ok": False}),
+            )
+        )
+
     def _apply_telemetry(self, telemetry: ArduinoTelemetry, now: datetime) -> None:
         events_to_emit: list[SystemEvent] = []
         transition_detected = False
+        commands_to_send: list[ArduinoCommand] = []
+        persist_desired = False
 
         with self._lock:
             was_online = self._telemetry_online
+            was_fault = self._real_sensor_fault
             self._telemetry_online = True
-            self._last_telemetry_monotonic = time.monotonic()
+            mono_now = time.monotonic()
+            self._last_telemetry_monotonic = mono_now
 
             if not was_online:
+                # Toda (re)conexão: o Arduino pode ter reiniciado com valores padrão.
+                self._resync_pending = True
+                self._resync_attempts = 0
+                self._resync_last_monotonic = 0.0
                 events_to_emit.append(
                     SystemEvent(
                         timestamp=now,
@@ -162,51 +204,85 @@ class StopNetworkManager:
 
             self._real_temp = telemetry.temp
             self._real_fan = telemetry.fan
+            self._real_sensor_fault = telemetry.sensor_fault
+            self._real_sensor_error = telemetry.sensor_error
             if telemetry.limit is not None:
                 self._real_limit = telemetry.limit
             if telemetry.mode is not None:
                 self._real_mode = telemetry.mode
             self._real_last_updated = now
 
-            real_reading = StopReading(
-                timestamp=now,
-                stop_id=self._real_cfg.stop_id,
-                stop_name=self._real_cfg.name,
-                origin=self._real_cfg.origin,
-                temperature=self._real_temp,
-                temp_limit=self._real_limit,
-                ventilation=self._real_fan,
-                mode=self._real_mode,
-            )
-            virtual_readings = self._deriver.derive_from_real(self._real_temp, now)
-            all_readings = [real_reading, *virtual_readings]
+            if telemetry.sensor_fault and not was_fault:
+                events_to_emit.append(
+                    SystemEvent(
+                        timestamp=now,
+                        stop_id=self._real_cfg.stop_id,
+                        event_type=EventType.SENSOR_FAULT,
+                        message=(
+                            f"{self._real_cfg.name}: falha no sensor de temperatura "
+                            f"({telemetry.sensor_error}). Arduino em modo de segurança; "
+                            "derivação das paradas simuladas pausada."
+                        ),
+                    )
+                )
+            elif was_fault and not telemetry.sensor_fault:
+                events_to_emit.append(
+                    SystemEvent(
+                        timestamp=now,
+                        stop_id=self._real_cfg.stop_id,
+                        event_type=EventType.SENSOR_RECOVERED,
+                        message=f"{self._real_cfg.name}: sensor de temperatura normalizado.",
+                    )
+                )
 
-            for reading in all_readings:
-                prev = self._prev_ventilation.get(reading.stop_id)
-                if prev is not None and prev != reading.ventilation:
+            if telemetry.temp is not None:
+                real_reading = StopReading(
+                    timestamp=now,
+                    stop_id=self._real_cfg.stop_id,
+                    stop_name=self._real_cfg.name,
+                    origin=self._real_cfg.origin,
+                    temperature=telemetry.temp,
+                    temp_limit=self._real_limit,
+                    ventilation=self._real_fan,
+                    mode=self._real_mode,
+                )
+                virtual_readings = self._deriver.derive_from_real(telemetry.temp, now)
+                all_readings = [real_reading, *virtual_readings]
+            else:
+                # Sem temperatura não há leitura para gravar (coluna NOT NULL).
+                self._deriver.apply_sensor_fault(now)
+                all_readings = []
+
+            states = self._build_all_states_locked()
+            for st in states:
+                prev = self._prev_ventilation.get(st.stop_id)
+                if prev is not None and prev != st.ventilation:
                     transition_detected = True
                     ev_type = (
-                        EventType.VENTILATION_ON
-                        if reading.ventilation
-                        else EventType.VENTILATION_OFF
+                        EventType.VENTILATION_ON if st.ventilation else EventType.VENTILATION_OFF
                     )
-                    action_txt = "ligada" if reading.ventilation else "desligada"
+                    action_txt = "ligada" if st.ventilation else "desligada"
+                    detail = (
+                        f"{st.temperature:.2f} °C / limite {st.temp_limit:.1f} °C"
+                        if st.temperature is not None
+                        else f"falha no sensor / limite {st.temp_limit:.1f} °C"
+                    )
                     events_to_emit.append(
                         SystemEvent(
                             timestamp=now,
-                            stop_id=reading.stop_id,
+                            stop_id=st.stop_id,
                             event_type=ev_type,
-                            message=(
-                                f"{reading.stop_name}: ventilação {action_txt} "
-                                f"({reading.temperature:.2f} °C / "
-                                f"limite {reading.temp_limit:.1f} °C)."
-                            ),
+                            message=f"{st.name}: ventilação {action_txt} ({detail}).",
                         )
                     )
-                self._prev_ventilation[reading.stop_id] = reading.ventilation
+                self._prev_ventilation[st.stop_id] = st.ventilation
 
-            mono_now = time.monotonic()
-            should_persist = (
+            commands_to_send, resync_events, persist_desired = self._reconcile_locked(
+                telemetry, now, mono_now
+            )
+            events_to_emit.extend(resync_events)
+
+            should_persist = bool(all_readings) and (
                 transition_detected
                 or not was_online
                 or (mono_now - self._last_persist_monotonic)
@@ -217,12 +293,19 @@ class StopNetworkManager:
 
             summary = self._build_summary_locked()
             states = self._build_all_states_locked()
+            desired = (self._desired_limit, self._desired_mode, self._desired_manual_fan)
 
         if should_persist:
             try:
                 self._repo.save_readings(all_readings)
             except Exception:
                 logger.exception("Erro ao persistir leituras no SQLite.")
+
+        if persist_desired:
+            try:
+                self._repo.save_stop_setting(self._real_cfg.stop_id, *desired)
+            except Exception:
+                logger.exception("Erro ao persistir configuração da Parada 1.")
 
         for event in events_to_emit:
             self._record_and_publish_event(event)
@@ -246,6 +329,138 @@ class StopNetworkManager:
                 "readings": [r.to_dict() for r in all_readings],
             },
         )
+
+        # Enviado por último e fora do lock: o simulador responde de forma síncrona.
+        for cmd in commands_to_send:
+            if not self._transport.send_command(cmd):
+                logger.warning("Falha ao enviar comando de ressincronização %s.", cmd.cmd.value)
+
+    def _reconcile_locked(
+        self,
+        telemetry: ArduinoTelemetry,
+        now: datetime,
+        mono_now: float,
+    ) -> tuple[list[ArduinoCommand], list[SystemEvent], bool]:
+        """Compara o estado reportado pelo Arduino com o estado desejado da Raspi.
+
+        - Após (re)conexão: reenvia limite/modo salvos até o Arduino confirmar.
+        - Online: mudanças de modo/cooler pelo botão físico viram o novo estado desejado;
+          divergência de limite (o Arduino não altera o limite sozinho) indica reinício
+          do Arduino e dispara nova ressincronização.
+        """
+        events: list[SystemEvent] = []
+        in_grace = (mono_now - self._last_command_monotonic) < COMMAND_GRACE_SECONDS
+        limit_diverges = (
+            telemetry.limit is not None
+            and abs(telemetry.limit - self._desired_limit) > LIMIT_TOLERANCE
+        )
+
+        if not self._resync_pending:
+            if in_grace:
+                return [], events, False
+            if limit_diverges:
+                logger.warning(
+                    "Limite do Arduino (%.1f) difere do salvo (%.1f): provável reinício.",
+                    telemetry.limit,
+                    self._desired_limit,
+                )
+                self._resync_pending = True
+                self._resync_attempts = 0
+                self._resync_last_monotonic = 0.0
+            else:
+                return [], events, self._adopt_local_changes_locked(telemetry)
+
+        commands = self._resync_commands_locked(telemetry)
+        if not commands:
+            if self._resync_attempts > 0:
+                events.append(
+                    SystemEvent(
+                        timestamp=now,
+                        stop_id=self._real_cfg.stop_id,
+                        event_type=EventType.STATE_RESYNC,
+                        message=(
+                            f"{self._real_cfg.name}: configuração salva restaurada no Arduino "
+                            f"(limite {self._desired_limit:.1f} °C, modo "
+                            f"{self._desired_mode.value})."
+                        ),
+                    )
+                )
+            self._resync_pending = False
+            return [], events, False
+
+        if self._resync_attempts >= RESYNC_MAX_ATTEMPTS:
+            if (mono_now - self._resync_last_monotonic) < RESYNC_RETRY_SECONDS:
+                return [], events, False
+            # Desiste e adota o estado do Arduino para não entrar em laço.
+            self._resync_pending = False
+            if telemetry.limit is not None:
+                self._desired_limit = telemetry.limit
+            self._adopt_local_changes_locked(telemetry)
+            events.append(
+                SystemEvent(
+                    timestamp=now,
+                    stop_id=self._real_cfg.stop_id,
+                    event_type=EventType.STATE_RESYNC,
+                    message=(
+                        f"{self._real_cfg.name}: Arduino não confirmou a configuração salva "
+                        f"após {RESYNC_MAX_ATTEMPTS} tentativas; adotando os valores do Arduino."
+                    ),
+                )
+            )
+            return [], events, True
+
+        if (
+            self._resync_attempts > 0
+            and (mono_now - self._resync_last_monotonic) < RESYNC_RETRY_SECONDS
+        ):
+            return [], events, False
+
+        self._resync_attempts += 1
+        self._resync_last_monotonic = mono_now
+        self._last_command_monotonic = mono_now
+        logger.info(
+            "Ressincronizando Arduino (tentativa %d/%d): %s",
+            self._resync_attempts,
+            RESYNC_MAX_ATTEMPTS,
+            [(c.cmd.value, c.value) for c in commands],
+        )
+        return commands, events, False
+
+    def _resync_commands_locked(self, telemetry: ArduinoTelemetry) -> list[ArduinoCommand]:
+        commands: list[ArduinoCommand] = []
+        if (
+            telemetry.limit is not None
+            and abs(telemetry.limit - self._desired_limit) > LIMIT_TOLERANCE
+        ):
+            commands.append(ArduinoCommand(cmd=CommandType.SET_LIMIT, value=self._desired_limit))
+        if telemetry.mode is not None:
+            if self._desired_mode == ControlMode.AUTO and telemetry.mode == ControlMode.MANUAL:
+                commands.append(
+                    ArduinoCommand(cmd=CommandType.SET_MODE, value=ControlMode.AUTO.value)
+                )
+            elif self._desired_mode == ControlMode.MANUAL and (
+                telemetry.mode != ControlMode.MANUAL or telemetry.fan != self._desired_manual_fan
+            ):
+                commands.append(
+                    ArduinoCommand(cmd=CommandType.SET_FAN, value=self._desired_manual_fan)
+                )
+        return commands
+
+    def _adopt_local_changes_locked(self, telemetry: ArduinoTelemetry) -> bool:
+        """Aceita mudanças feitas no próprio Arduino (botão físico). Retorna se mudou algo."""
+        if telemetry.mode is None:
+            return False
+        new_fan = telemetry.fan if telemetry.mode == ControlMode.MANUAL else False
+        if (telemetry.mode, new_fan) == (self._desired_mode, self._desired_manual_fan):
+            return False
+        logger.info(
+            "Estado alterado localmente no Arduino: modo=%s cooler=%s",
+            telemetry.mode.value,
+            telemetry.fan,
+        )
+        self._desired_mode = telemetry.mode
+        self._desired_manual_fan = new_fan
+        return True
 
     def _handle_transport_status(self, connected: bool, detail: str) -> None:
         logger.info(
@@ -332,7 +547,14 @@ class StopNetworkManager:
                     http_status=503,
                 )
             cmd = ArduinoCommand(cmd=CommandType.SET_LIMIT, value=validated)
+            with self._lock:
+                # Marcado antes do envio: o simulador responde com telemetria síncrona.
+                previous_limit = self._desired_limit
+                self._desired_limit = validated
+                self._last_command_monotonic = time.monotonic()
             if not self._transport.send_command(cmd):
+                with self._lock:
+                    self._desired_limit = previous_limit
                 return CommandResult(
                     ok=False,
                     stop_id=stop_id,
@@ -341,10 +563,12 @@ class StopNetworkManager:
                 )
             with self._lock:
                 self._real_limit = validated
-                mode = self._real_mode
-                fan = self._real_fan
+                self._desired_limit = validated
+                self._last_command_monotonic = time.monotonic()
+                mode = self._desired_mode
+                manual_fan = self._desired_manual_fan
                 state = self._build_real_state_locked()
-            self._repo.save_stop_setting(stop_id, validated, mode, fan)
+            self._repo.save_stop_setting(stop_id, validated, mode, manual_fan)
             self._record_and_publish_event(
                 SystemEvent(
                     timestamp=now,
@@ -427,6 +651,9 @@ class StopNetworkManager:
                 if normalized == "turn_off"
                 else ArduinoCommand(cmd=CommandType.SET_MODE, value=ControlMode.AUTO.value)
             )
+            with self._lock:
+                # Marcado antes do envio: o simulador responde com telemetria síncrona.
+                self._last_command_monotonic = time.monotonic()
             if not self._transport.send_command(cmd):
                 return CommandResult(
                     ok=False,
@@ -438,13 +665,18 @@ class StopNetworkManager:
                 if normalized == "turn_off":
                     self._real_mode = ControlMode.MANUAL
                     self._real_fan = False
+                    self._desired_mode = ControlMode.MANUAL
+                    self._desired_manual_fan = False
                 else:
                     self._real_mode = ControlMode.AUTO
-                limit = self._real_limit
-                mode = self._real_mode
-                fan = self._real_fan
+                    self._desired_mode = ControlMode.AUTO
+                    self._desired_manual_fan = False
+                self._last_command_monotonic = time.monotonic()
+                limit = self._desired_limit
+                mode = self._desired_mode
+                manual_fan = self._desired_manual_fan
                 state = self._build_real_state_locked()
-            self._repo.save_stop_setting(stop_id, limit, mode, fan)
+            self._repo.save_stop_setting(stop_id, limit, mode, manual_fan)
             msg = (
                 f"{self._real_cfg.name}: comando para desligar ventilação (MANUAL) "
                 "enviado ao Arduino."
@@ -550,7 +782,11 @@ class StopNetworkManager:
         self._broadcaster.publish("event_log", event.to_dict())
 
     def _build_real_state_locked(self) -> StopState:
-        if not self._telemetry_online or self._real_temp is None:
+        if not self._telemetry_online:
+            status = StopStatus.DESCONECTADO
+        elif self._real_sensor_fault:
+            status = StopStatus.FALHA_SENSOR
+        elif self._real_temp is None:
             status = StopStatus.DESCONECTADO
         elif self._real_fan:
             status = StopStatus.VENTILANDO
@@ -582,7 +818,12 @@ class StopNetworkManager:
         temps = [s.temperature for s in states if s.temperature is not None]
         avg_temp = round(sum(temps) / len(temps), 2) if temps else None
         max_temp = round(max(temps), 2) if temps else None
-        ventilating_count = sum(1 for s in states if s.status == StopStatus.VENTILANDO)
+        ventilating_count = sum(
+            1
+            for s in states
+            if s.status == StopStatus.VENTILANDO
+            or (s.status == StopStatus.FALHA_SENSOR and s.ventilation)
+        )
         return NetworkSummary(
             connected=self._telemetry_online,
             operation_mode=self._transport.mode_name,
@@ -590,4 +831,6 @@ class StopNetworkManager:
             max_temperature=max_temp,
             ventilating_count=ventilating_count,
             total_stops=len(states),
+            sensor_fault=self._telemetry_online and self._real_sensor_fault,
+            sensor_error=self._real_sensor_error if self._telemetry_online else None,
         )

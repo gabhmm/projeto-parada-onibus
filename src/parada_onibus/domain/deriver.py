@@ -29,6 +29,7 @@ class _VirtualStopRuntime:
     last_temperature: float | None = None
     last_ventilation: bool = False
     last_updated: datetime | None = None
+    sensor_fault: bool = False
 
 
 class VirtualStopDeriver:
@@ -71,6 +72,7 @@ class VirtualStopDeriver:
             runtime.last_temperature = derived_temp
             runtime.last_ventilation = ventilation
             runtime.last_updated = timestamp
+            runtime.sensor_fault = False
             readings.append(
                 StopReading(
                     timestamp=timestamp,
@@ -85,12 +87,24 @@ class VirtualStopDeriver:
             )
         return readings
 
+    def apply_sensor_fault(self, timestamp: datetime) -> None:
+        """Sensor real em falha: sem temperatura para derivar.
+
+        Espelha o fail-safe do Arduino: em AUTO a ventilação fica ligada; em MANUAL
+        mantém o estado definido pelo operador.
+        """
+        for runtime in self._stops.values():
+            runtime.sensor_fault = True
+            runtime.last_temperature = None
+            runtime.last_ventilation = self._evaluate_ventilation(runtime, None)
+            runtime.last_updated = timestamp
+
     def set_limit(self, stop_id: str, new_limit: float, *, connected: bool) -> StopState:
         """Atualiza o limite de temperatura de uma parada virtual e reavalia ventilação."""
         runtime = self._require(stop_id)
         validated = validate_temperature_limit(new_limit)
         runtime.temp_limit = validated
-        if runtime.last_temperature is not None:
+        if runtime.last_temperature is not None or runtime.sensor_fault:
             runtime.last_ventilation = self._evaluate_ventilation(runtime, runtime.last_temperature)
         return self.get_state(stop_id, connected=connected)
 
@@ -106,7 +120,7 @@ class VirtualStopDeriver:
         """Retorna a parada virtual ao modo automático e reavalia a regra temp >= limite."""
         runtime = self._require(stop_id)
         runtime.mode = ControlMode.AUTO
-        if runtime.last_temperature is not None:
+        if runtime.last_temperature is not None or runtime.sensor_fault:
             runtime.last_ventilation = self._evaluate_ventilation(runtime, runtime.last_temperature)
         else:
             runtime.last_ventilation = False
@@ -114,7 +128,11 @@ class VirtualStopDeriver:
 
     def get_state(self, stop_id: str, *, connected: bool) -> StopState:
         runtime = self._require(stop_id)
-        if not connected or runtime.last_temperature is None:
+        if not connected:
+            status = StopStatus.DESCONECTADO
+        elif runtime.sensor_fault:
+            status = StopStatus.FALHA_SENSOR
+        elif runtime.last_temperature is None:
             status = StopStatus.DESCONECTADO
         elif runtime.last_ventilation:
             status = StopStatus.VENTILANDO
@@ -143,7 +161,9 @@ class VirtualStopDeriver:
         return runtime
 
     @staticmethod
-    def _evaluate_ventilation(runtime: _VirtualStopRuntime, temperature: float) -> bool:
+    def _evaluate_ventilation(runtime: _VirtualStopRuntime, temperature: float | None) -> bool:
         if runtime.mode == ControlMode.MANUAL:
             return runtime.manual_fan
+        if temperature is None:
+            return True  # fail-safe: sem leitura confiável, ventila
         return temperature >= runtime.temp_limit

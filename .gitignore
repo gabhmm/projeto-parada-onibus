@@ -22,3 +22,4 @@ data/*.db-shm
 # Ambiente local
 .env
 config.toml
+uv.lock

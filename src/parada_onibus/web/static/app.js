@@ -41,6 +41,11 @@
     });
   }
 
+  const STATUS_LABELS = {
+    DESCONECTADO: "SEM SINAL",
+    FALHA_SENSOR: "FALHA SENSOR",
+  };
+
   function formatTemp(value) {
     if (value === null || value === undefined || Number.isNaN(Number(value))) {
       return "-- °C";
@@ -70,8 +75,11 @@
     els.kpiMaxTemp.textContent = formatTemp(summary.max_temperature);
     els.kpiVentCount.textContent = `${summary.ventilating_count} / ${summary.total_stops}`;
 
-    els.connectionPill.classList.remove("status-connected", "status-disconnected");
-    if (summary.connected) {
+    els.connectionPill.classList.remove("status-connected", "status-disconnected", "status-fault");
+    if (summary.connected && summary.sensor_fault) {
+      els.connectionPill.classList.add("status-fault");
+      els.connectionText.textContent = `Arduino conectado — FALHA NO SENSOR (${summary.sensor_error || "sensor"})`;
+    } else if (summary.connected) {
       els.connectionPill.classList.add("status-connected");
       els.connectionText.textContent = isSim
         ? "Simulador Ativo (3 paradas)"
@@ -129,7 +137,7 @@
             <span class="badge badge-mode" data-role="mode-badge">AUTO</span>
           </div>
         </div>
-        <span class="status-pill state-${stop.status}" data-role="status-pill">${stop.status}</span>
+        <span class="status-pill state-${stop.status}" data-role="status-pill">${STATUS_LABELS[stop.status] || stop.status}</span>
       </div>
 
       <div class="stop-metrics">
@@ -206,7 +214,7 @@
 
     const statusPill = card.querySelector('[data-role="status-pill"]');
     statusPill.className = `status-pill state-${stop.status}`;
-    statusPill.textContent = stop.status === "DESCONECTADO" ? "SEM SINAL" : stop.status;
+    statusPill.textContent = STATUS_LABELS[stop.status] || stop.status;
 
     const modeBadge = card.querySelector('[data-role="mode-badge"]');
     modeBadge.textContent = stop.mode === "MANUAL" ? "MANUAL" : "AUTOMÁTICO";

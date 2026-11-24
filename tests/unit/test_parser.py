@@ -38,6 +38,30 @@ def test_parse_valid_minimal_telemetry() -> None:
     assert result.mode is None
 
 
+def test_parse_sensor_failure_from_firmware() -> None:
+    result = parse_serial_line('{"temp":null,"fan":true,"limit":30.0,"mode":"AUTO","err":"dht"}')
+    assert isinstance(result, ArduinoTelemetry)
+    assert result.temp is None
+    assert result.sensor_fault is True
+    assert result.sensor_error == "dht"
+    assert result.fan is True
+    assert result.limit == 30.0
+
+
+def test_parse_sensor_failure_without_err_field() -> None:
+    result = parse_serial_line('{"temp": null, "fan": false}')
+    assert isinstance(result, ArduinoTelemetry)
+    assert result.sensor_fault is True
+    assert result.sensor_error == "sensor"
+
+
+def test_parse_valid_reading_has_no_sensor_fault() -> None:
+    result = parse_serial_line('{"temp":25.0,"fan":false,"limit":30.0,"mode":"AUTO"}')
+    assert isinstance(result, ArduinoTelemetry)
+    assert result.sensor_fault is False
+    assert result.sensor_error is None
+
+
 def test_parse_optional_ack() -> None:
     result = parse_serial_line('{"ack": "set_limit", "ok": true}')
     assert isinstance(result, ArduinoAck)

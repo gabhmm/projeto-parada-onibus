@@ -81,11 +81,21 @@ def parse_serial_line(
     if "temp" not in decoded or "fan" not in decoded:
         raise ParseError("Telemetria deve conter os campos obrigatórios 'temp' e 'fan'.")
 
-    temp = _extract_finite_float(decoded, "temp")
-    if not (MIN_VALID_TEMP <= temp <= MAX_VALID_TEMP):
-        raise ParseError(
-            f"Temperatura fora da faixa plausível ({MIN_VALID_TEMP} a {MAX_VALID_TEMP} °C): {temp}"
-        )
+    temp: float | None
+    sensor_error: str | None = None
+    if decoded["temp"] is None:
+        # Falha do sensor reportada pelo Arduino: "temp": null (+ "err" opcional).
+        temp = None
+        raw_err = decoded.get("err")
+        sensor_error = str(raw_err).strip() if raw_err is not None else ""
+        sensor_error = sensor_error or "sensor"
+    else:
+        temp = _extract_finite_float(decoded, "temp")
+        if not (MIN_VALID_TEMP <= temp <= MAX_VALID_TEMP):
+            raise ParseError(
+                f"Temperatura fora da faixa plausível "
+                f"({MIN_VALID_TEMP} a {MAX_VALID_TEMP} °C): {temp}"
+            )
 
     raw_fan = decoded["fan"]
     if not isinstance(raw_fan, bool):
@@ -110,11 +120,12 @@ def parse_serial_line(
             raise ParseError(f"Modo inválido recebido: {raw_mode!r}") from exc
 
     return ArduinoTelemetry(
-        temp=round(temp, 2),
+        temp=round(temp, 2) if temp is not None else None,
         fan=raw_fan,
         limit=limit,
         mode=mode,
         received_at=received_at or datetime.now(UTC),
+        sensor_error=sensor_error,
     )
 
 

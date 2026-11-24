@@ -20,6 +20,10 @@
   --disconnected-bg: rgba(245, 158, 11, 0.14);
   --disconnected-border: rgba(245, 158, 11, 0.45);
 
+  --fault-main: #f87171;
+  --fault-bg: rgba(239, 68, 68, 0.16);
+  --fault-border: rgba(239, 68, 68, 0.5);
+
   --radius: 14px;
   --shadow: 0 10px 30px rgba(0, 0, 0, 0.28);
 }
@@ -122,6 +126,12 @@ body {
   color: var(--disconnected-main);
   background: var(--disconnected-bg);
   border-color: var(--disconnected-border);
+}
+
+.connection-pill.status-fault {
+  color: var(--fault-main);
+  background: var(--fault-bg);
+  border-color: var(--fault-border);
 }
 
 .export-group {
@@ -319,6 +329,10 @@ input[type="number"]:focus {
   border-top-color: var(--disconnected-main);
 }
 
+.stop-card.state-FALHA_SENSOR {
+  border-top-color: var(--fault-main);
+}
+
 .stop-header {
   display: flex;
   justify-content: space-between;
@@ -395,6 +409,12 @@ input[type="number"]:focus {
   color: var(--disconnected-main);
   background: var(--disconnected-bg);
   border: 1px solid var(--disconnected-border);
+}
+
+.status-pill.state-FALHA_SENSOR {
+  color: var(--fault-main);
+  background: var(--fault-bg);
+  border: 1px solid var(--fault-border);
 }
 
 .stop-metrics {

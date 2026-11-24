@@ -14,7 +14,7 @@ Este documento define o protocolo oficial entre o **Arduino (Parada 1 — Maquet
 
 ## 2. Telemetria: Arduino → Raspberry Pi
 
-O Arduino executa localmente e de forma autônoma a regra de ventilação (`se temperatura >= limite, liga cooler e LED; senão, desliga`) e envia **1 linha JSON a cada ~1 segundo** (recomendado entre `1s` e `2s`; acima de `6s` sem envio a Raspi marcará `DESCONECTADO`).
+O Arduino executa localmente e de forma autônoma a regra de ventilação com histerese (`liga cooler e LED em temp >= limite; desliga em temp <= limite - 1.0`) e envia **1 linha JSON a cada ~1 segundo** (recomendado entre `1s` e `2s`; acima de `6s` sem envio a Raspi marcará `DESCONECTADO`).
 
 ### Payload de Telemetria
 ```json
@@ -23,10 +23,24 @@ O Arduino executa localmente e de forma autônoma a regra de ventilação (`se t
 
 | Campo | Tipo | Obrigatório | Descrição |
 | --- | --- | --- | --- |
-| `temp` | `float` | **Sim** | Temperatura medida pelo sensor em °C (valores válidos: `-20.0` a `100.0`). |
+| `temp` | `float` ou `null` | **Sim** | Temperatura medida pelo sensor em °C (valores válidos: `-20.0` a `100.0`). `null` indica falha do sensor (ver 2.1). |
 | `fan` | `bool` | **Sim** | `true` se a ventilação/cooler está ligada; `false` se desligada. |
 | `limit` | `float` | Não | Temperatura limite ativa no Arduino em °C (padrão inicial: `30.0`). |
-| `mode` | `string` | Não | `"AUTO"` (regra automática ativa) ou `"MANUAL"` (override via painel). |
+| `mode` | `string` | Não | `"AUTO"` (regra automática ativa) ou `"MANUAL"` (override via painel ou botão físico). |
+| `err` | `string` | Não | Código da falha do sensor quando `temp` é `null` (ex.: `"dht"`). |
+
+### 2.1 Falha do sensor
+Se a leitura do sensor falhar (NaN ou fora da faixa), o Arduino **continua enviando telemetria** com `temp: null`, liga o cooler por segurança (em `AUTO`) e informa o motivo em `err`:
+```json
+{"temp": null, "fan": true, "limit": 30.0, "mode": "AUTO", "err": "dht"}
+```
+A Raspberry Pi mantém a conexão como ativa, exibe o status `FALHA_SENSOR` na Parada 1, não grava leituras sem temperatura e pausa a derivação das Paradas 2 e 3 (que também passam a `FALHA_SENSOR`, ventilando em `AUTO`). Os eventos `SENSOR_FAULT` / `SENSOR_RECOVERED` são registrados no histórico.
+
+### 2.2 Botão físico
+- **Clique curto:** entra em `MANUAL` e inverte o cooler.
+- **Clique longo (≥ 1,5 s):** volta para `AUTO`.
+
+A Raspberry Pi adota essas mudanças de modo/cooler (vindas da telemetria) como a nova configuração salva da Parada 1.
 
 > **Observação:** Linhas soltas de debug que não sejam JSON válido são ignoradas com segurança pela Raspberry Pi, mas evite enviar texto fora de JSON em produção.
 
@@ -59,6 +73,18 @@ Não é obrigatório implementar handshake extra: o próprio próximo envio de t
 ```json
 {"ack": "set_limit", "ok": true}
 ```
+Um ACK com `"ok": false` é registrado no histórico como `COMMAND_REJECTED`.
+
+### 3.4 Ressincronização da configuração salva
+O Arduino **não guarda** o limite nem o modo: a cada boot volta para `30.0` / `AUTO`. Abrir a porta Serial reinicia o Arduino Uno (reset via DTR), então isso acontece toda vez que o servidor inicia ou o cabo é reconectado.
+
+A Raspberry Pi é a fonte da verdade (configuração persistida no SQLite):
+1. Na primeira telemetria válida após cada (re)conexão — ou seja, quando o Arduino já saiu do bootloader — compara `limit`/`mode`/`fan` com a configuração salva.
+2. Se divergir, reenvia `set_limit` e/ou `set_mode`/`set_fan`, repetindo a cada 3 s, até 3 tentativas.
+3. Se o Arduino não confirmar, adota os valores do Arduino (evento `STATE_RESYNC`) para não entrar em laço.
+4. Com a conexão ativa, um `limit` diferente do salvo (o Arduino não altera o limite sozinho) indica reinício do Arduino (ex.: queda de tensão ao chavear o relé) e dispara nova ressincronização.
+
+Por isso o Arduino deve sempre incluir `limit` e `mode` na telemetria.
 
 ---
 

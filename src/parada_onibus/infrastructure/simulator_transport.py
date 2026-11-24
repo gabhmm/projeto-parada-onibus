@@ -12,6 +12,9 @@ from parada_onibus.domain.ports import LineCallback, StatusCallback
 
 logger = logging.getLogger(__name__)
 
+# Mesma histerese do firmware: liga em temp >= limite, desliga em temp <= limite - 1.0.
+HYSTERESIS = 1.0
+
 
 class SimulatedTransport:
     """Gera telemetria NDJSON sintética cruzando 30 °C e responde a comandos de controle."""
@@ -31,6 +34,7 @@ class SimulatedTransport:
         self._temp_limit = initial_limit
         self._mode = ControlMode.AUTO
         self._manual_fan = False
+        self._auto_fan = False
         self._step = 0
         self._last_temp = base_temp
 
@@ -100,7 +104,11 @@ class SimulatedTransport:
             self._stop_event.wait(self._interval)
 
     def _build_frame_locked(self, temp: float) -> str:
-        fan = self._manual_fan if self._mode == ControlMode.MANUAL else temp >= self._temp_limit
+        if not self._auto_fan and temp >= self._temp_limit:
+            self._auto_fan = True
+        elif self._auto_fan and temp <= self._temp_limit - HYSTERESIS:
+            self._auto_fan = False
+        fan = self._manual_fan if self._mode == ControlMode.MANUAL else self._auto_fan
         payload = {
             "temp": temp,
             "fan": fan,

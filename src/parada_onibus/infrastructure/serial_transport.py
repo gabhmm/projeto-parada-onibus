@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 
 import serial
 
@@ -14,6 +15,10 @@ from parada_onibus.domain.ports import LineCallback, StatusCallback
 logger = logging.getLogger(__name__)
 
 
+class _SerialIdleError(serial.SerialException):
+    """Porta aberta, mas sem nenhum byte recebido pelo tempo limite (link morto)."""
+
+
 class SerialTransport:
     """Gerencia leitura contínua NDJSON e envio de comandos ao Arduino via USB Serial."""
 
@@ -22,10 +27,14 @@ class SerialTransport:
         port: str,
         baud_rate: int = 9600,
         reconnect_max_seconds: float = 5.0,
+        idle_reconnect_seconds: float = 10.0,
     ) -> None:
         self._port = port
         self._baud_rate = baud_rate
         self._reconnect_max = max(1.0, reconnect_max_seconds)
+        # Arduino envia ~1 linha/s: silêncio prolongado com a porta "aberta" indica
+        # link morto (Arduino travado, cabo com mau contato, USB/IP caído) -> reabre.
+        self._idle_reconnect = max(2.0, idle_reconnect_seconds)
         self._stop_event = threading.Event()
         self._write_lock = threading.Lock()
         self._serial: serial.Serial | None = None
@@ -86,16 +95,25 @@ class SerialTransport:
                     timeout=1.0,
                     write_timeout=2.0,
                 )
+                # Descarta linhas antigas acumuladas antes do reset (DTR) do Arduino:
+                # a 1ª telemetria lida deve vir do Arduino já fora do bootloader.
+                conn.reset_input_buffer()
                 with self._write_lock:
                     self._serial = conn
                 self._connected = True
                 backoff = 1.0
                 on_status(True, f"Porta Serial conectada em {self._port} ({self._baud_rate} bps).")
 
+                last_data = time.monotonic()
                 while not self._stop_event.is_set():
                     raw = conn.readline()
                     if not raw:
+                        if time.monotonic() - last_data > self._idle_reconnect:
+                            raise _SerialIdleError(
+                                f"nenhum dado recebido em {self._idle_reconnect:.0f}s"
+                            )
                         continue
+                    last_data = time.monotonic()
                     decoded = raw.decode("utf-8", errors="replace").strip()
                     if decoded:
                         on_line(decoded)

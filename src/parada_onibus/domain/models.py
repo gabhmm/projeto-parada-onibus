@@ -28,6 +28,7 @@ class StopStatus(StrEnum):
     NORMAL = "NORMAL"
     VENTILANDO = "VENTILANDO"
     DESCONECTADO = "DESCONECTADO"
+    FALHA_SENSOR = "FALHA_SENSOR"
 
 
 class CommandType(StrEnum):
@@ -47,6 +48,10 @@ class EventType(StrEnum):
     LIMIT_CHANGED = "LIMIT_CHANGED"
     SERIAL_CONNECTED = "SERIAL_CONNECTED"
     SERIAL_DISCONNECTED = "SERIAL_DISCONNECTED"
+    SENSOR_FAULT = "SENSOR_FAULT"
+    SENSOR_RECOVERED = "SENSOR_RECOVERED"
+    COMMAND_REJECTED = "COMMAND_REJECTED"
+    STATE_RESYNC = "STATE_RESYNC"
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,13 +85,22 @@ class AppConfig:
 
 @dataclass(frozen=True, slots=True)
 class ArduinoTelemetry:
-    """Telemetria validada recebida do Arduino (Parada 1) via Serial NDJSON."""
+    """Telemetria validada recebida do Arduino (Parada 1) via Serial NDJSON.
 
-    temp: float
+    ``temp`` é ``None`` quando o Arduino reporta falha do sensor (``"temp": null``);
+    nesse caso ``sensor_error`` traz o código informado em ``err`` (ou ``"sensor"``).
+    """
+
+    temp: float | None
     fan: bool
     limit: float | None = None
     mode: ControlMode | None = None
     received_at: datetime | None = None
+    sensor_error: str | None = None
+
+    @property
+    def sensor_fault(self) -> bool:
+        return self.temp is None
 
 
 @dataclass(frozen=True, slots=True)
@@ -203,6 +217,8 @@ class NetworkSummary:
     max_temperature: float | None
     ventilating_count: int
     total_stops: int
+    sensor_fault: bool = False
+    sensor_error: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -212,6 +228,8 @@ class NetworkSummary:
             "max_temperature": self.max_temperature,
             "ventilating_count": self.ventilating_count,
             "total_stops": self.total_stops,
+            "sensor_fault": self.sensor_fault,
+            "sensor_error": self.sensor_error,
         }
 
 
