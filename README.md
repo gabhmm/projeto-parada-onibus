@@ -92,7 +92,7 @@ O sketch de referência fica em [`firmware/parada1_ventilacao/parada1_ventilacao
 | Sensor DHT11 (dados) | D2 | Leitura a cada 2 s; resolução de 1 °C |
 | Botão | D3 | Entre o pino e o GND (usa `INPUT_PULLUP`) |
 | Relé do cooler | D7 | Ventoinha nos bornes **COM** e **NO** (normalmente aberto) |
-| LED RGB (R / G / B) | D9 / D10 / D11 | Com resistor em cada cor |
+| LED RGB (R / G / B) | D10 / D9 / D8 | Com resistor em cada cor |
 
 Ajustes no topo do sketch, conforme o hardware:
 - `RELE_ATIVO_EM_LOW = true`: módulos de relé comuns (com optoacoplador, pinos `IN/VCC/GND`) ligam com o pino em LOW. Sintoma de valor errado: a ventoinha liga junto com o Arduino e o painel mostra "DESLIGADA".
